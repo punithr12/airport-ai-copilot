@@ -1,0 +1,2 @@
+{"instruction":"SFO completion rate has dropped. What should we do?","context":"SFO telemetry and retrieved policy","tool_calls":["get_airport_metrics"],"recommendation":"Increase surge to 1.5x","policy_check":"allowed","human_approval":true,"final_action":"executed"}
+{"instruction":"SFO surge increase to 2.0x","context":"SFO pricing policy","tool_calls":[],"recommendation":"Block requested surge increase","policy_check":"blocked","human_approval":false,"final_action":"stopped"}
