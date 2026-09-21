@@ -696,23 +696,6 @@ The project is intended solely for:
 - RAG experimentation
 - AI-agent architecture demonstrations
 
----
-
-# 👨‍💻 Author
-
-**Punith R**
-
-AI/ML Engineer | Data Analyst | Generative AI
-
-### GitHub
-
-https://github.com/punithr12
-
-### Project Repository
-
-https://github.com/punithr12/airport-ai-copilot
-
----
 
 # ⭐ Project Highlights
 
