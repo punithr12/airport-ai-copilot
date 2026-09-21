@@ -1,127 +1,156 @@
 import chromadb
-from sentence_transformers import SentenceTransformer
-
-from document_loader import load_policy_documents, chunk_documents
-import os
-
-SYSTEM_CA = "/etc/ssl/certs/ca-certificates.crt"
-
-os.environ["REQUESTS_CA_BUNDLE"] = SYSTEM_CA
-os.environ["SSL_CERT_FILE"] = SYSTEM_CA
-os.environ["CURL_CA_BUNDLE"] = SYSTEM_CA
-
-print("Using certificate bundle:", SYSTEM_CA)
-
-MODEL_NAME = "all-MiniLM-L6-v2"
-COLLECTION_NAME = "airport_policies"
-embedding_model = SentenceTransformer(MODEL_NAME)
+from sklearn.feature_extraction.text import TfidfVectorizer
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
-def create_embeddings(chunks):
-    """Generate embeddings for document chunks."""
+# ============================================================
+# 1. CHROMA DATABASE
+# ============================================================
 
-    texts = [chunk["content"] for chunk in chunks]
+chroma_client = chromadb.PersistentClient(
+    path="chroma_db"
+)
 
-    embeddings = embedding_model.encode(
-        texts,
-        show_progress_bar=True
+
+# ============================================================
+# 2. CREATE FRESH COLLECTION
+# ============================================================
+
+try:
+    chroma_client.delete_collection(
+        name="airport_policies"
+    )
+except Exception:
+    pass
+
+
+collection = chroma_client.create_collection(
+    name="airport_policies"
+)
+
+
+# ============================================================
+# 3. TEXT SPLITTER
+# ============================================================
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=100
+)
+
+
+# ============================================================
+# 4. TF-IDF VECTORIZER
+# ============================================================
+
+vectorizer = TfidfVectorizer(
+    stop_words="english"
+)
+
+
+# ============================================================
+# 5. ADD DOCUMENTS
+# ============================================================
+
+def add_documents(documents):
+
+    all_chunks = []
+    all_metadata = []
+    all_ids = []
+
+    chunk_id = 0
+
+    # -----------------------------
+    # Split documents into chunks
+    # -----------------------------
+
+    for doc in documents:
+
+        source = doc["source"]
+        text = doc["text"]
+
+        chunks = text_splitter.split_text(text)
+
+        print(
+            f"{source} -> {len(chunks)} chunks"
+        )
+
+        for chunk in chunks:
+
+            if not chunk.strip():
+                continue
+
+            all_chunks.append(chunk)
+
+            all_metadata.append({
+                "source": source
+            })
+
+            all_ids.append(
+                str(chunk_id)
+            )
+
+            chunk_id += 1
+
+
+    # -----------------------------
+    # Safety check
+    # -----------------------------
+
+    if not all_chunks:
+
+        raise ValueError(
+            "No chunks were created."
+        )
+
+
+    # -----------------------------
+    # Create TF-IDF vectors
+    # -----------------------------
+
+    embeddings = vectorizer.fit_transform(
+        all_chunks
+    ).toarray()
+
+
+    print(
+        f"\nVector dimensions: {embeddings.shape[1]}"
     )
 
-    return embeddings
 
+    # -----------------------------
+    # Add to Chroma
+    # -----------------------------
 
-def create_vector_store(chunks, embeddings):
-    """Store policy chunks and embeddings in ChromaDB."""
-
-    client = chromadb.PersistentClient(
-        path="data/vector_store"
+    collection.add(
+        ids=all_ids,
+        documents=all_chunks,
+        metadatas=all_metadata,
+        embeddings=embeddings.tolist()
     )
 
-    collection = client.get_or_create_collection(
-        name=COLLECTION_NAME
+
+    print(
+        f"Added {len(all_chunks)} chunks to ChromaDB."
     )
 
-    ids = [f"policy_chunk_{i}" for i in range(len(chunks))]
 
-    documents = [chunk["content"] for chunk in chunks]
+# ============================================================
+# 6. SEARCH POLICY
+# ============================================================
 
-    metadatas = [
-        {"source": chunk["source"]}
-        for chunk in chunks
-    ]
+def search_policy(query, top_k=3):
 
-    collection.upsert(
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings.tolist(),
-        metadatas=metadatas
-    )
+    # Convert query into the same TF-IDF space
+    query_vector = vectorizer.transform(
+        [query]
+    ).toarray()
 
-    return collection
-
-def search_policy(query, n_results=3):
-    """Retrieve the most relevant policy chunks for a query."""
-
-
-    client = chromadb.PersistentClient(
-        path="data/vector_store"
-    )
-
-    collection = client.get_collection(
-        name=COLLECTION_NAME
-    )
-
-    query_embedding = embedding_model.encode([query])
 
     results = collection.query(
-        query_embeddings=query_embedding.tolist(),
-        n_results=n_results
+        query_embeddings=query_vector.tolist(),
+        n_results=top_k
     )
 
-    retrieved_chunks = []
 
-    for i in range(len(results["documents"][0])):
-        retrieved_chunks.append({
-            "content": results["documents"][0][i],
-            "source": results["metadatas"][0][i]["source"],
-            "distance": results["distances"][0][i]
-        })
-
-    return retrieved_chunks
-
-
-if __name__ == "__main__":
-    documents = load_policy_documents()
-    chunks = chunk_documents(documents)
-
-    embeddings = create_embeddings(chunks)
-
-    collection = create_vector_store(
-        chunks,
-        embeddings
-    )
-
-    print("\nVector store created successfully")
-    print(f"Documents stored: {collection.count()}")
-
-    test_questions = [
-        "What is the maximum surge allowed at SFO?",
-        "Can drivers abandon the airport queue at SFO?",
-        "Does increasing surge require approval at SFO?",
-        "What is the expected completion rate at LAX?",
-        "What is the maximum surge allowed at JFK?"
-    ]
-
-    print("\nPolicy Retrieval Tests")
-    print("=" * 70)
-
-    for question in test_questions:
-        print(f"\nQuestion: {question}")
-
-        results = search_policy(question, n_results=1)
-
-        result = results[0]
-
-        print(f"Retrieved Source: {result['source']}")
-        print(f"Distance: {result['distance']:.4f}")
-        print(f"Content: {result['content'][:250]}...")
+    return results

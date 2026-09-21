@@ -1,97 +1,169 @@
 import os
+import time
 
 from dotenv import load_dotenv
 from google import genai
 
-from vector_store import search_policy
+from src.vector_store import search_policy
 
+
+# ============================================================
+# LOAD ENVIRONMENT
+# ============================================================
 
 load_dotenv()
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+api_key = os.getenv("GEMINI_API_KEY")
 
-if not API_KEY:
-    raise ValueError("GEMINI_API_KEY is not configured in .env")
-
-client = genai.Client(api_key=API_KEY)
+if not api_key:
+    raise ValueError("GEMINI_API_KEY not found in .env")
 
 
-def generate_rag_response(question, n_results=3):
-    """
-    Generate a grounded response using retrieved airport policies.
-    """
+# ============================================================
+# GEMINI CLIENT
+# ============================================================
+
+client = genai.Client(
+    api_key=api_key
+)
+
+
+# ============================================================
+# GEMINI CALL WITH RETRY
+# ============================================================
+
+def generate_with_retry(prompt, max_retries=4):
+
+    for attempt in range(max_retries):
+
+        try:
+
+            response = client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=prompt
+            )
+
+            return response.text
+
+        except Exception as e:
+
+            error_text = str(e)
+
+            # Retry only temporary server/rate-limit errors
+            if "503" in error_text or "UNAVAILABLE" in error_text:
+
+                if attempt < max_retries - 1:
+
+                    wait_time = 5 * (2 ** attempt)
+
+                    print(
+                        f"\nGemini temporarily unavailable."
+                    )
+
+                    print(
+                        f"Retrying in {wait_time} seconds..."
+                    )
+
+                    time.sleep(wait_time)
+
+                else:
+
+                    raise e
+
+            else:
+
+                raise e
+
+
+# ============================================================
+# RAG FUNCTION
+# ============================================================
+
+def ask_policy(question, top_k=3):
+
+    # --------------------------------------------------------
+    # 1. RETRIEVE POLICY CHUNKS
+    # --------------------------------------------------------
 
     results = search_policy(
         question,
-        n_results=n_results
+        top_k=top_k
     )
 
-    context_parts = []
+    documents = results["documents"][0]
+    metadatas = results["metadatas"][0]
 
-    for result in results:
+
+    # --------------------------------------------------------
+    # 2. BUILD CONTEXT
+    # --------------------------------------------------------
+
+    context_parts = []
+    sources = []
+
+    for document, metadata in zip(
+        documents,
+        metadatas
+    ):
+
+        source = metadata["source"]
+
         context_parts.append(
-            f"Source: {result['source']}\n"
-            f"Policy Content:\n{result['content']}"
+            f"[Source: {source}]\n{document}"
         )
+
+        if source not in sources:
+            sources.append(source)
+
 
     context = "\n\n".join(context_parts)
 
-    prompt = f"""
-You are an Airport Operations AI Copilot.
 
-Answer the user's question using ONLY the policy information
-provided in the retrieved context.
+    # --------------------------------------------------------
+    # 3. GROUNDED PROMPT
+    # --------------------------------------------------------
+
+    prompt = f"""
+You are an Airport Operations Policy Assistant.
+
+Answer the user's question using ONLY the supplied
+airport policy context.
 
 Rules:
-1. Do not invent policy information.
-2. If the retrieved context does not contain enough information,
-   clearly say that the policy information is insufficient.
-3. Give a concise and factual answer.
-4. Identify the source policy document used.
-5. Do not use outside knowledge.
+- Do not use outside knowledge.
+- Do not invent policy rules.
+- If the context does not contain the answer, say:
+  "The available policy documents do not contain enough
+  information to answer this."
+- Give a concise answer.
+- Identify the relevant source document.
 
-Retrieved Policy Context:
+POLICY CONTEXT:
+----------------
 {context}
+----------------
 
-User Question:
+USER QUESTION:
 {question}
 
-Provide:
-- Answer
-- Source
+Answer using only the policy context.
 """
 
-    response = client.models.generate_content(
-    model="gemini-3.6-flash",
-    contents=prompt
-)
 
-    return response.text, results
+    # --------------------------------------------------------
+    # 4. GENERATE ANSWER
+    # --------------------------------------------------------
+
+    answer = generate_with_retry(prompt)
 
 
-if __name__ == "__main__":
-    test_questions = [
-        "What is the maximum surge allowed at SFO?",
-        "Can drivers abandon the airport queue at SFO?",
-        "Does increasing surge require approval at SFO?",
-        "What is the expected completion rate at LAX?",
-        "What is the maximum surge allowed at JFK?"
-    ]
+    # --------------------------------------------------------
+    # 5. RETURN RESULT
+    # --------------------------------------------------------
 
-    for i, question in enumerate(test_questions, start=1):
-        print(f"\n{'=' * 70}")
-        print(f"TEST {i}")
-        print(f"Question: {question}")
-        print("=" * 70)
-
-        answer, results = generate_rag_response(question)
-
-        print("\nRAG RESPONSE:")
-        print(answer)
-
-        print("\nSOURCE DOCUMENTS:")
-        for result in results:
-            print(
-                f"- {result['source']} "
-                f"(distance={result['distance']:.4f})"
-            )
+    return {
+        "question": question,
+        "answer": answer,
+        "sources": sources,
+        "retrieved_documents": documents
+    }

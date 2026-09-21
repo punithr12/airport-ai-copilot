@@ -1,4 +1,7 @@
-sentence-transformers
-chromadb
-python-dotenv
 google-genai
+python-dotenv
+chromadb
+langchain
+langchain-text-splitters
+scikit-learn
+pandas
